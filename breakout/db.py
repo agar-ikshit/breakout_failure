@@ -15,19 +15,15 @@ def get_supabase_client() -> Optional[Client]:
         logger.exception("Failed to create Supabase client: %s", e)
         return None
 
-def insert_failures(records: List[Dict]) -> Dict:
-    """
-    Insert a list of failure dicts into the `breakout_failures` table.
-    Each record should include: company, ticker, location, failure_time (as ISO str or datetime).
-    """
+def insert_failures(records):
     client = get_supabase_client()
-    if client is None:
-        return {"error": "supabase_not_configured"}
-
+    if not client:
+        print("Supabase client not initialized.")
+        return {"data": None, "error": "Client not initialized"}
+    
     try:
-        # supabase-py uses .table('name').insert(...).execute()
         res = client.table("breakout_failures").insert(records).execute()
-        return {"data": res.data, "status_code": res.status_code}
+        return {"data": res.data, "error": None}
     except Exception as e:
-        logger.exception("Error inserting records into supabase: %s", e)
-        return {"error": str(e)}
+        print(f"Error inserting records into supabase: {e}")
+        return {"data": None, "error": str(e)}

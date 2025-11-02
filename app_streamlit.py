@@ -76,7 +76,7 @@ if run_btn:
                 "failure_time": r["failure_time"].isoformat() if hasattr(r["failure_time"], "isoformat") else str(r["failure_time"])
             } for r in results]
             res = insert_failures(payload)
-            if "error" in res:
+            if res.get("error"):
                 st.error(f"Failed to save: {res['error']}")
             else:
                 st.success("Saved results to Supabase")
