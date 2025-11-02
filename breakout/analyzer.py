@@ -9,105 +9,96 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def download_ohlcv(symbol: str, period: str = "5d", interval: str = "1d") -> Optional[pd.DataFrame]:
+def get_intraday_data(symbol: str, period: str = "5d", interval: str = "15m") -> Optional[pd.DataFrame]:
     """
-    Fetch OHLCV data using yfinance.
-    Automatically tries with '', '.NS', and '.BO' suffixes.
+    Fetch intraday OHLCV data for NSE stocks using Yahoo Finance.
+    Example symbol: 'RELIANCE.NS', 'TCS.NS', etc.
     """
-    for suffix in ["", ".NS", ".BO"]:
-        try:
-            df = yf.download(symbol + suffix, period=period, interval=interval, progress=False, auto_adjust=False)
-            if not df.empty:
-                df = df.reset_index()
-                df.columns = [c.capitalize() for c in df.columns]
-                if "Datetime" not in df.columns:
-                    df.rename(columns={"Date": "Datetime"}, inplace=True)
-                return df
-        except Exception as e:
-            logger.warning("Attempt with %s%s failed: %s", symbol, suffix, e)
-            continue
+    try:
+        logger.info(f"Fetching {symbol} data from Yahoo Finance...")
+        df = yf.download(symbol, period=period, interval=interval, progress=False)
 
-    logger.error("Failed to fetch data for %s", symbol)
-    return None
+        if df.empty:
+            logger.warning(f"No data for {symbol}")
+            return None
 
+        # Flatten multi-level columns (new yfinance versions)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = [col[0] for col in df.columns]
 
-def analyze_vrz_vwap(
-    ticker: str,
-    company_name: str,
-    interval: str = "1d",
-    period: str = "5d",
-    k: float = K_FACTOR,
-    window: int = LOCAL_WINDOW
-) -> Optional[List[Dict]]:
-    """
-    Analyze a single ticker for breakout failures using VRZ logic and ATR,
-    using yfinance OHLCV data.
-    """
-    df = download_ohlcv(ticker, period=period, interval=interval)
-    if df is None:
-        logger.warning("No candle data for %s", ticker)
+        # Drop missing rows and reset index
+        df = df.dropna().reset_index()
+
+        # Normalize column names
+        df.rename(columns={"Datetime": "Date"}, inplace=True, errors="ignore")
+
+        # Basic check
+        required_cols = {"Open", "High", "Low", "Close", "Volume"}
+        if not required_cols.issubset(df.columns):
+            logger.warning(f"Missing required OHLCV columns in {symbol}")
+            return None
+
+        return df
+
+    except Exception as e:
+        logger.error(f"Failed to fetch Yahoo Finance data for {symbol}: {e}")
         return None
 
-    # Compute ATR
-    df["H-L"] = df["High"] - df["Low"]
-    df["H-C"] = (df["High"] - df["Close"].shift(1)).abs()
-    df["L-C"] = (df["Low"] - df["Close"].shift(1)).abs()
-    df["TR"] = df[["H-L", "H-C", "L-C"]].max(axis=1)
-    df["ATR"] = compute_atr(df)
 
-    df["VRZ_High"] = np.nan
-    df["VRZ_Low"] = np.nan
+def analyze_vrz_vwap(ticker, company_name, k=2, window=20):
+    """Analyze breakout failures using only Yahoo Finance data (with fixes)"""
+    full_ticker = ticker if ticker.endswith(".NS") else f"{ticker}.NS"
+    try:
+        df = yf.download(full_ticker, period="5d", interval="5m", progress=False)
+        if df.empty:
+            print(f"No data for {full_ticker}")
+            return []
 
-    # Local extrema detection
-    local_max_idx = find_local_maxima(df["High"], window)
-    for i in local_max_idx:
-        atr_val = df["ATR"].iloc[i]
-        if pd.notna(atr_val):
-            df.at[i, "VRZ_High"] = df["High"].iloc[i] + k * atr_val
+        # Handle multi-index columns (Yahoo Finance sometimes gives these)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = [col[0] for col in df.columns]
 
-    local_min_idx = find_local_minima(df["Low"], window)
-    for i in local_min_idx:
-        atr_val = df["ATR"].iloc[i]
-        if pd.notna(atr_val):
-            df.at[i, "VRZ_Low"] = df["Low"].iloc[i] - k * atr_val
+        df = df.dropna().reset_index()
 
-    # Forward-fill levels
-    df["VRZ_High_ffill"] = df["VRZ_High"].ffill()
-    df["VRZ_Low_ffill"] = df["VRZ_Low"].ffill()
+        # Compute VWAP safely
+        df["VWAP"] = (df["Volume"] * (df["High"] + df["Low"] + df["Close"]) / 3).cumsum() / df["Volume"].cumsum()
 
-    breakout_failures = []
-    lookahead_bars = 10
+        # Compute ATR (simplified rolling high-low range)
+        df["ATR"] = (df["High"] - df["Low"]).rolling(window=window, min_periods=1).mean()
 
-    # VRZ High breakout failure
-    for i in range(len(df)):
-        vrz_high_val = df["VRZ_High_ffill"].iloc[i]
-        if pd.notna(vrz_high_val) and df["Close"].iloc[i] > vrz_high_val:
-            for j in range(i + 1, min(i + lookahead_bars + 1, len(df))):
-                if df["Close"].iloc[j] < vrz_high_val:
-                    breakout_failures.append({
-                        "company": company_name,
-                        "ticker": ticker,
-                        "failure_time": pd.to_datetime(df["Datetime"].iloc[j]),
-                        "location": "VRZ High",
-                        "break_time": pd.to_datetime(df["Datetime"].iloc[i]),
-                        "close_at_failure": float(df["Close"].iloc[j])
-                    })
-                    break
+        # Bands
+        df["upper_band"] = df["VWAP"] + k * df["ATR"]
+        df["lower_band"] = df["VWAP"] - k * df["ATR"]
 
-    # VRZ Low breakout failure
-    for i in range(len(df)):
-        vrz_low_val = df["VRZ_Low_ffill"].iloc[i]
-        if pd.notna(vrz_low_val) and df["Close"].iloc[i] < vrz_low_val:
-            for j in range(i + 1, min(i + lookahead_bars + 1, len(df))):
-                if df["Close"].iloc[j] > vrz_low_val:
-                    breakout_failures.append({
-                        "company": company_name,
-                        "ticker": ticker,
-                        "failure_time": pd.to_datetime(df["Datetime"].iloc[j]),
-                        "location": "VRZ Low",
-                        "break_time": pd.to_datetime(df["Datetime"].iloc[i]),
-                        "close_at_failure": float(df["Close"].iloc[j])
-                    })
-                    break
+        failures = []
+        for i in range(1, len(df)):
+            prev_close = df["Close"].iloc[i - 1]
+            curr_close = df["Close"].iloc[i]
+            prev_upper = df["upper_band"].iloc[i - 1]
+            curr_upper = df["upper_band"].iloc[i]
+            prev_lower = df["lower_band"].iloc[i - 1]
+            curr_lower = df["lower_band"].iloc[i]
 
-    return breakout_failures
+            # Detect upper band failure (cross from above to below)
+            if prev_close > prev_upper and curr_close < curr_upper:
+                failures.append({
+                    "company": company_name,
+                    "ticker": full_ticker,
+                    "location": "Above → Below Upper Band",
+                    "failure_time": df["Datetime"].iloc[i] if "Datetime" in df.columns else df["Date"].iloc[i],
+                })
+
+            # Detect lower band failure (cross from below to above)
+            elif prev_close < prev_lower and curr_close > curr_lower:
+                failures.append({
+                    "company": company_name,
+                    "ticker": full_ticker,
+                    "location": "Below → Above Lower Band",
+                    "failure_time": df["Datetime"].iloc[i] if "Datetime" in df.columns else df["Date"].iloc[i],
+                })
+
+        return failures
+
+    except Exception as e:
+        print(f"Error analyzing {ticker}: {e}")
+        return []

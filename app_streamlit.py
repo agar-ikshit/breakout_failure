@@ -40,7 +40,7 @@ if run_btn:
     for idx, t in enumerate(tickers, start=1):
         status.text(f"Analyzing {t} ({idx}/{len(tickers)})")
         spinner.info("Downloading and computing...")
-        failures = analyze_vrz_vwap(t.replace(".NS", ""), NIFTY50_SAMPLE.get(t, t),
+        failures = analyze_vrz_vwap(t , NIFTY50_SAMPLE.get(t, t),
         k=k,
         window=window
     )
