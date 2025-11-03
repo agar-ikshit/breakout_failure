@@ -9,5 +9,5 @@ numpy==1.26.4
 yfinance==0.2.43
 
 supabase==2.5.1
-
+plotly
 streamlit==1.38.0
